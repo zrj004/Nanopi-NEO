@@ -1,0 +1,87 @@
+name: Build Armbian (current)
+
+on:
+  repository_dispatch:
+  workflow_dispatch:
+    inputs:
+      set_board:
+        description: "Select Board"
+        required: false
+        default: "nanopineo"
+        type: choice
+        options:
+          - nanopineo
+          - nanopineo2
+
+env:
+  OUTPUT_DIR: /tmp/images
+  IMAGE_FILENAME: ${{ inputs.set_board }}_armbian_current
+  UPLOAD_RELEASE: true
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    if: github.event.repository.owner.id == github.event.sender.id
+
+    steps:
+    - name: Checkout workflow repo
+      uses: actions/checkout@v4
+
+    - name: Initialize build environment
+      env:
+        DEBIAN_FRONTEND: noninteractive
+      run: |
+        sudo rm -rf /etc/apt/sources.list.d/* \
+                    /usr/share/dotnet \
+                    /usr/local/lib/android \
+                    /opt/ghc
+        sudo apt-get update -qq
+        sudo apt-get autoremove --purge -y -qq
+        sudo apt-get clean
+        sudo apt-get install -y qemu-user-static
+
+    - name: Clone Armbian build system
+      run: |
+        git clone --depth=1 --branch=main https://github.com/armbian/build.git
+        cd build
+        mkdir -p userpatches
+
+    - name: Build Armbian image (current)
+      run: |
+        cd build
+        ./compile.sh build \
+          BOARD=${{ inputs.set_board }} \
+          BRANCH=current \
+          RELEASE=jammy \
+          BUILD_MINIMAL=no \
+          BUILD_DESKTOP=no \
+          KERNEL_CONFIGURE=no \
+          SKIP_DRIVERS="rtw88"
+
+    - name: Package image
+      run: |
+        mkdir -p "${OUTPUT_DIR}"
+        cd build/output/images
+        tar -Jcvf "${OUTPUT_DIR}/${IMAGE_FILENAME}.tar.xz" *.img
+
+    - name: Upload image artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: ${{ inputs.set_board }}-armbian-current
+        path: ${{ env.OUTPUT_DIR }}/*.tar.xz
+
+    - name: Generate release tag
+      id: tag
+      if: env.UPLOAD_RELEASE == 'true' && !cancelled()
+      run: |
+        echo "release_tag=$(date +"%Y.%m.%d-%H%M")" >> $GITHUB_OUTPUT
+
+    - name: Upload image to GitHub Release
+      if: steps.tag.outputs.release_tag && !cancelled()
+      uses: softprops/action-gh-release@v1
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      with:
+        name: ${{ env.IMAGE_FILENAME }}-${{ steps.tag.outputs.release_tag }}
+        tag_name: ${{ steps.tag.outputs.release_tag }}
+        files: ${{ env.OUTPUT_DIR }}/*.tar.xz
